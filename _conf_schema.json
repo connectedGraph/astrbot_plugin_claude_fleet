@@ -1,0 +1,53 @@
+{
+  "server_url": {
+    "description": "claude-fleet-server 地址",
+    "type": "string",
+    "default": "http://127.0.0.1:3180",
+    "hint": "默认只允许本机地址，不经过系统代理。"
+  },
+  "api_key": {
+    "description": "Fleet Bearer API Key",
+    "type": "string",
+    "default": "",
+    "obvious_hint": true,
+    "hint": "对应服务端 FLEET_API_KEYS 中冒号左侧的 key。"
+  },
+  "allow_remote_server": {
+    "description": "允许连接非本机 Fleet 服务",
+    "type": "bool",
+    "default": false
+  },
+  "storage_dir": {
+    "description": "插件数据目录",
+    "type": "string",
+    "default": "",
+    "hint": "留空使用 AstrBot/data/plugin_data/astrbot_plugin_claude_fleet。"
+  },
+  "auto_poll_enabled": {
+    "description": "自动静默查询任务",
+    "type": "bool",
+    "default": true,
+    "hint": "直接请求本地 REST API，不会唤醒模型。"
+  },
+  "poll_interval_seconds": {
+    "description": "静默查询间隔（秒）",
+    "type": "int",
+    "default": 15
+  },
+  "poll_timeout_hours": {
+    "description": "单个任务自动查询最长时间（小时）",
+    "type": "int",
+    "default": 24,
+    "hint": "超过后停止查询并最多通知一次。"
+  },
+  "max_files_per_message": {
+    "description": "单条消息最多登记文件数",
+    "type": "int",
+    "default": 20
+  },
+  "max_file_bytes": {
+    "description": "单个文件大小上限（字节）",
+    "type": "int",
+    "default": 8388608
+  }
+}

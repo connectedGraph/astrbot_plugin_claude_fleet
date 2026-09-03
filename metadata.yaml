@@ -1,0 +1,10 @@
+name: astrbot_plugin_claude_fleet
+display_name: Claude Fleet 本地任务桥接
+short_desc: 将 QQ 文件和任务提交到本地 claude-fleet-server，完成后自动发送产物。
+desc: 对接 connectedGraph/claude-fleet-server 的本地 REST API，支持文件登记、Base64 多文件提交、静默轮询、失败单次通知和产物自动发送；后台查询不唤醒 LLM。
+version: v1.0.0
+author: connectedGraph
+astrbot_version: ">=4.25.1"
+support_platforms:
+  - aiocqhttp
+repo: https://github.com/connectedGraph/astrbot_plugin_claude_fleet
