@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Fleet · Console</title>
+<style>
+  :root {
+    --paper:#f7f3ea; --paper-deep:#efe9db; --card:#fffdf7; --ink:#3a3226; --ink-light:#7a7060;
+    --line:#ddd3bf; --line-dark:#c9bda3; --accent:#8c6b3f; --accent-deep:#6e5330;
+    --seal:#a5382e; --green:#4a7c59; --amber:#9a7b2d; --blue:#4a6b8a;
+    --shadow:0 1px 3px rgba(90,75,50,.08), 0 4px 16px rgba(90,75,50,.06);
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; color:var(--ink); background:var(--paper);
+    font-family:"Noto Serif SC","Songti SC","SimSun",Georgia,serif; line-height:1.8;
+    background-image:radial-gradient(ellipse at top, rgba(255,255,255,.6), transparent 60%);
+  }
+  header { border-bottom:2px solid var(--line-dark); background:var(--paper-deep); padding:26px 24px; }
+  header .wrap { max-width:880px; margin:0 auto; display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; }
+  header h1 { margin:0; font-size:26px; font-weight:700; letter-spacing:6px; }
+  header h1 .seal-dot { color:var(--seal); }
+  header p { margin:0; color:var(--ink-light); font-size:14px; }
+  main { max-width:880px; margin:0 auto; padding:26px 24px 90px; }
+  .card {
+    background:var(--card); border:1px solid var(--line); border-radius:4px;
+    padding:24px; margin-bottom:22px; box-shadow:var(--shadow); position:relative;
+  }
+  .card::before {
+    content:""; position:absolute; top:8px; left:8px; right:8px; bottom:8px;
+    border:1px solid rgba(140,107,63,.12); border-radius:2px; pointer-events:none;
+  }
+  h2 { font-size:18px; margin:0 0 6px; font-weight:700; letter-spacing:2px; display:flex; align-items:center; gap:8px; }
+  h2::before { content:""; width:5px; height:18px; background:var(--seal); border-radius:1px; }
+  .sub { color:var(--ink-light); font-size:13px; margin:0 0 14px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .btn {
+    border:1px solid var(--accent-deep); border-radius:3px; padding:8px 18px; font-size:14px; cursor:pointer;
+    color:#fff; background:var(--accent); font-family:inherit; letter-spacing:2px; transition:background .15s;
+  }
+  .btn:hover { background:var(--accent-deep); }
+  .btn:disabled { opacity:.45; cursor:not-allowed; }
+  .btn-ghost { background:transparent; color:var(--accent-deep); }
+  .btn-ghost:hover { background:rgba(140,107,63,.08); }
+  .btn-danger { background:var(--seal); border-color:#7d2a22; }
+  .btn-danger:hover { background:#8b2f26; }
+  .btn-sm { padding:5px 12px; font-size:13px; letter-spacing:1px; }
+  code, .mono { font-family:"SF Mono","Consolas","Courier New",monospace; font-size:.92em; word-break:break-all; }
+  .muted { color:var(--ink-light); font-size:13px; }
+  .badge {
+    display:inline-block; padding:2px 12px; border-radius:2px; font-size:12.5px; letter-spacing:1px; border:1px solid transparent;
+  }
+  .badge-ok { background:#eaf2ec; color:var(--green); border-color:#c3d6c8; }
+  .badge-warn { background:#f5eeda; color:var(--amber); border-color:#ddd0a5; }
+  .badge-err { background:#f6e7e5; color:var(--seal); border-color:#dcc0bc; }
+  .badge-run { background:#e6edf3; color:var(--blue); border-color:#c2d0dc; }
+  .badge-none { background:var(--paper-deep); color:var(--ink-light); border-color:var(--line); }
+  .error { color:var(--seal); font-size:14px; margin-top:10px; }
+  .field { margin-bottom:14px; }
+  .field label { display:block; font-size:13.5px; color:var(--ink-light); margin-bottom:4px; letter-spacing:1px; }
+  .field input, .field select {
+    width:100%; padding:9px 12px; border:1px solid var(--line-dark); border-radius:3px; font-size:14px;
+    color:var(--ink); background:#fffef9; font-family:inherit;
+  }
+  .field input:focus, .field select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 2px rgba(140,107,63,.12); }
+  .field input.mono { font-family:"SF Mono",monospace; font-size:13px; }
+  .field .hint { font-size:12px; color:var(--ink-light); margin-top:3px; }
+  .secret-row { display:flex; gap:8px; }
+  .secret-row input { flex:1; }
+  .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:0 18px; }
+  .providers-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:6px; align-items:center; }
+  .provider-list { margin-top:12px; }
+  .provider { border:1px solid var(--line); border-radius:3px; padding:12px 16px; margin-bottom:10px; background:rgba(255,253,247,.6); }
+  .provider.active { border-color:var(--accent); background:rgba(245,238,218,.35); }
+  .provider-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .provider-id { font-family:"SF Mono",monospace; font-size:13px; font-weight:700; }
+  .provider-meta { font-size:12.5px; color:var(--ink-light); margin-top:5px; word-break:break-all; }
+  .provider-actions { display:flex; gap:6px; margin-left:auto; flex-wrap:wrap; }
+  .tasks { margin-top:6px; }
+  .task { border:1px solid var(--line); border-radius:3px; padding:12px 16px; margin-bottom:10px; background:rgba(255,253,247,.6); }
+  .task-head { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .task-id { font-family:"SF Mono",monospace; font-size:12px; color:var(--ink-light); }
+  .task-msg { font-size:13.5px; margin-top:5px; }
+  .task-console { background:var(--paper-deep); border-radius:3px; padding:8px 12px; margin-top:8px; font-size:12px; color:var(--ink-light); max-height:180px; overflow-y:auto; }
+  .task-console .step { padding:1px 0; }
+  .task-console .t { color:#a89a7e; margin-right:8px; font-family:"SF Mono",monospace; }
+  .task-actions { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+  .task-actions a { color:var(--accent-deep); font-size:13.5px; }
+  .stats-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-top:10px; }
+  .stat { background:var(--paper-deep); border:1px solid var(--line); border-radius:3px; padding:12px; text-align:center; }
+  .stat strong { display:block; font-size:24px; line-height:1.3; font-weight:700; }
+  .stat span { color:var(--ink-light); font-size:12px; letter-spacing:2px; }
+  .empty { padding:16px 0; color:var(--ink-light); font-size:14px; }
+  @media (max-width:650px) { .stats-grid { grid-template-columns:repeat(2,1fr); } .form-grid { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Claude Fleet<span class="seal-dot"> · </span>控制台</h1>
+    <p>供应商映射 · 任务进度 · Claude worker 状态</p>
+  </div>
+</header>
+<main>
+  <div class="card">
+    <div class="row">
+      <div>
+        <h2>当前登录</h2>
+        <div class="muted" id="who">加载中…</div>
+      </div>
+      <a class="btn btn-ghost" href="/api/logout?next=/api/login?next=/console">退出登录</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div><h2>Claude worker</h2><div class="muted">自动定位安装的 Claude Code CLI 并校验版本门槛</div></div>
+    </div>
+    <div class="sub">
+      <span id="claudeBin">—</span><br>
+      <span>版本 <strong id="claudeVer">—</strong> · 门槛 <span id="claudeMin">≥2.0.0</span></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <h2>供应商映射</h2>
+        <div class="muted" id="providerStatus">加载中…</div>
+      </div>
+      <span class="badge badge-none" id="activeProviderBadge">—</span>
+    </div>
+    <p class="sub">Agent 固定连本机代理，由这里决定转发到哪个真实供应商。Anthropic 原生走透传，OpenAI 兼容走协议转换。</p>
+    <div class="provider-list" id="providerList"></div>
+    <details id="providerEditor" style="margin-top:4px;">
+      <summary class="muted" style="cursor:pointer;">添加 / 编辑供应商</summary>
+      <div class="form-grid" style="margin-top:10px;">
+        <div class="field">
+          <label for="pId">供应商 ID（英文标识）</label>
+          <input id="pId" class="mono" placeholder="tokenrhythm" autocomplete="off">
+          <div class="hint">创建后不可修改</div>
+        </div>
+        <div class="field">
+          <label for="pType">协议类型</label>
+          <select id="pType">
+            <option value="anthropic">Anthropic 原生（透传）</option>
+            <option value="openai">OpenAI 兼容（需转换）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="pBaseUrl">API 端点 (Base URL)</label>
+          <input id="pBaseUrl" class="mono" placeholder="https://tokenrhythm.studio/v1">
+          <div class="hint">anthropic 填含 /anthropic 的地址，openai 填含 /v1 的地址</div>
+        </div>
+        <div class="field">
+          <label for="pModel">Model</label>
+          <input id="pModel" class="mono" placeholder="glm-5.3-flash">
+        </div>
+        <div class="field">
+          <label for="pApiKey">API Key</label>
+          <div class="secret-row">
+            <input id="pApiKey" type="password" class="mono" placeholder="sk-…" autocomplete="off">
+            <button class="btn btn-ghost btn-sm" id="pKeyToggle" type="button">显示</button>
+          </div>
+          <div class="hint" id="pKeyHint">已保存：<span id="pKeyPreview" class="mono">—</span>（留空保持不变）</div>
+        </div>
+      </div>
+      <div class="providers-actions">
+        <button class="btn" id="pSaveBtn">保存供应商</button>
+        <button class="btn btn-ghost" id="pSetActiveBtn">设为当前映射</button>
+        <button class="btn btn-ghost btn-sm" id="pResetBtn" type="button">清空表单</button>
+      </div>
+      <div class="error" id="providerError" hidden></div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div><h2>任务总览</h2><div class="muted" id="statsUpdated">加载中…</div></div>
+      <button class="btn btn-ghost btn-sm" id="refreshTasksBtn">刷新</button>
+    </div>
+    <div class="stats-grid">
+      <div class="stat"><strong id="statActive">0</strong><span>进行中</span></div>
+      <div class="stat"><strong id="statQueued">0</strong><span>排队</span></div>
+      <div class="stat"><strong id="statRunning">0</strong><span>运行</span></div>
+      <div class="stat"><strong id="statSucceeded">0</strong><span>完成</span></div>
+      <div class="stat"><strong id="statFailed">0</strong><span>失败</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div><h2>进行中的任务</h2></div>
+      <div class="muted" id="activeStatus"></div>
+    </div>
+    <div class="tasks" id="activeTasks"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div><h2>任务历史</h2></div>
+      <button class="btn btn-ghost btn-sm" id="loadMoreBtn">加载更多</button>
+    </div>
+    <div class="muted" id="historyStatus" style="margin-bottom:6px;"></div>
+    <div class="tasks" id="historyTasks"></div>
+  </div>
+</main>
+<script>
+(function () {
+  var TASKS = '/api/tasks';
+  var STATS = '/api/tasks/stats';
+  var PROVIDERS = '/api/providers';
+  var state = { historyOffset: 0, history: [] };
+
+  function $(id) { return document.getElementById(id); }
+  function esc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  async function api(method, url, body) {
+    var opts = { method: method, headers: {} };
+    if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+    var resp = await fetch(url, opts);
+    if (resp.status === 401) { window.location.href = '/api/login?next=' + encodeURIComponent('/console'); throw new Error('unauthorized'); }
+    var data = await resp.json().catch(function () { return {}; });
+    if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+    return data;
+  }
+
+  /* ---------- Claude worker 状态 ---------- */
+  $('claudeBin').textContent = '运行 Redacted 本机代理：127.0.0.1:' + (window.location.port || '3180');
+  $('claudeMin').textContent = '≥2.0.0（CLAUDE_MIN_VERSION 可覆盖）· 详情用「fleet doctor」';
+
+  /* ---------- 供应商映射 ---------- */
+  var providersState = { list: [], activeProviderId: null };
+  function providerBadge(type) {
+    return type === 'openai' ? '<span class="badge badge-warn">openai</span>' : '<span class="badge badge-run">anthropic</span>';
+  }
+  function renderProviders(data) {
+    providersState.list = data.providers || [];
+    providersState.activeProviderId = data.activeProviderId || null;
+    var active = providersState.list.find(function (p) { return p.id === providersState.activeProviderId; });
+    var badge = $('activeProviderBadge');
+    if (active) {
+      badge.textContent = '当前：' + active.id + ' · ' + active.model;
+      badge.className = 'badge badge-ok';
+    } else { badge.textContent = '未设置'; badge.className = 'badge badge-none'; }
+    $('providerStatus').textContent = '共 ' + providersState.list.length + ' 个供应商；新建任务按当前映射生效';
+    var box = $('providerList');
+    if (!providersState.list.length) { box.innerHTML = '<div class="empty">暂无供应商，展开下方表单添加。</div>'; return; }
+    box.innerHTML = providersState.list.map(function (p) {
+      var isActive = p.id === providersState.activeProviderId;
+      return '<div class="provider' + (isActive ? ' active' : '') + '">' +
+        '<div class="provider-head">' +
+          '<span class="provider-id">' + esc(p.id) + '</span>' + providerBadge(p.type) +
+          (isActive ? '<span class="badge badge-ok">当前映射</span>' : '') +
+          '<div class="provider-actions">' +
+            '<button class="btn btn-ghost btn-sm" data-setactive="' + esc(p.id) + '"' + (isActive ? ' disabled' : '') + '>设为当前</button>' +
+            '<button class="btn btn-ghost btn-sm" data-edit="' + esc(p.id) + '">编辑</button>' +
+            '<button class="btn btn-danger btn-sm" data-del="' + esc(p.id) + '">删除</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="provider-meta">' + esc(p.baseUrl) + ' · ' + esc(p.model) + '</div>' +
+        (p.apiKey ? '<div class="provider-meta">Key：<span class="mono">' + esc(p.apiKey) + '</span></div>' : '') +
+      '</div>';
+    }).join('');
+  }
+  function providerFormDefaults() {
+    $('pId').value = ''; $('pId').disabled = false; $('pType').value = 'openai';
+    $('pBaseUrl').value = ''; $('pModel').value = ''; $('pApiKey').value = '';
+    $('pApiKey').type = 'password'; $('pKeyToggle').textContent = '显示';
+    $('pKeyHint').style.display = 'none'; $('providerEditor').open = true; $('providerError').hidden = true;
+  }
+  function fillProviderForm(p) {
+    $('pId').value = p.id; $('pId').disabled = true; $('pType').value = p.type || 'openai';
+    $('pBaseUrl').value = p.baseUrl || ''; $('pModel').value = p.model || ''; $('pApiKey').value = '';
+    $('pApiKey').type = 'password'; $('pKeyToggle').textContent = '显示';
+    $('pKeyHint').style.display = '';
+    $('pKeyPreview').textContent = p.apiKey || '—';
+    $('providerEditor').open = true; $('providerError').hidden = true;
+    $('providerEditor').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  function showProviderError(m) { $('providerError').hidden = false; $('providerError').textContent = '操作失败：' + m; }
+  $('providerList').addEventListener('click', function (event) {
+    var button = event.target.closest('button'); if (!button) return;
+    var id = button.dataset.setactive || button.dataset.edit || button.dataset.del; if (!id) return;
+    if (button.dataset.setactive !== undefined) api('POST', PROVIDERS + '/active', { id: id }).then(renderProviders).catch(showProviderError);
+    else if (button.dataset.edit !== undefined) { var p = providersState.list.find(function (i) { return i.id === id; }); if (p) fillProviderForm(p); }
+    else if (button.dataset.del !== undefined) { if (!window.confirm('删除供应商「' + id + '」？')) return; api('DELETE', PROVIDERS + '/' + encodeURIComponent(id)).then(renderProviders).catch(showProviderError); }
+  });
+  $('pKeyToggle').addEventListener('click', function () {
+    var input = $('pApiKey'); if (input.type === 'password') { input.type = 'text'; this.textContent = '隐藏'; } else { input.type = 'password'; this.textContent = '显示'; }
+  });
+  $('pResetBtn').addEventListener('click', providerFormDefaults);
+  $('pSaveBtn').addEventListener('click', function () {
+    var id = $('pId').value.trim(); if (!id) { showProviderError('请填写供应商 ID'); return; }
+    var body = { type: $('pType').value, baseUrl: $('pBaseUrl').value.trim(), model: $('pModel').value.trim(), apiKey: $('pApiKey').value.trim() };
+    api('PUT', PROVIDERS + '/' + encodeURIComponent(id), body).then(function (data) { renderProviders(data); providerFormDefaults(); }).catch(showProviderError);
+  });
+  $('pSetActiveBtn').addEventListener('click', function () {
+    var id = $('pId').value.trim(); if (!id) { showProviderError('先填写或编辑一个供应商'); return; }
+    api('POST', PROVIDERS + '/active', { id: id }).then(renderProviders).catch(showProviderError);
+  });
+  api('GET', PROVIDERS).then(renderProviders).catch(showProviderError);
+
+  /* ---------- 登录信息 ---------- */
+  function statusBadge(status) {
+    switch (status) {
+      case 'queued': return '<span class="badge badge-warn">排队中</span>';
+      case 'running': return '<span class="badge badge-run">运行</span>';
+      case 'succeeded': return '<span class="badge badge-ok">已完成</span>';
+      case 'failed': return '<span class="badge badge-err">已失败</span>';
+      case 'expired': return '<span class="badge badge-none">已过期</span>';
+      default: return '<span class="badge badge-none">' + esc(status || '') + '</span>';
+    }
+  }
+  function renderTaskCards(tasks, target, emptyText) {
+    var box = $(target);
+    if (!tasks.length) { box.innerHTML = '<div class="empty">' + esc(emptyText) + '</div>'; return; }
+    box.innerHTML = tasks.map(function (t) {
+      var consoleHtml = (t.console || []).map(function (step) {
+        return '<div class="step"><span class="t">' + esc((step.at || '').slice(5, 19)) + '</span>' + esc(step.message || '') + '</div>';
+      }).join('');
+      var actionHtml = t.artifactUrl
+        ? '<a href="' + esc(t.artifactUrl) + '">下载成品 ↓</a>'
+        : (t.status === 'running' || t.status === 'queued' ? '<span class="muted">后台处理中…</span>' : '');
+      return '<div class="task">' +
+        '<div class="task-head">' + statusBadge(t.status) + '<span class="task-id">' + esc(t.taskId) + '</span></div>' +
+        '<div class="muted">创建 ' + esc(t.createdAt || '') + (t.finishedAt ? ' · 完成 ' + esc(t.finishedAt) : '') + '</div>' +
+        (t.message ? '<div class="task-msg">' + esc(t.message) + '</div>' : '') +
+        (consoleHtml ? '<div class="task-console">' + consoleHtml + '</div>' : '') +
+        '<div class="task-actions">' + actionHtml + (t.error ? '<span class="error">' + esc(t.error) + '</span>' : '') + '</div>' +
+      '</div>';
+    }).join('');
+  }
+  function renderStats(data) {
+    var c = data.counts || {};
+    $('statActive').textContent = data.active || 0;
+    $('statQueued').textContent = c.queued || 0;
+    $('statRunning').textContent = c.running || 0;
+    $('statSucceeded').textContent = c.succeeded || 0;
+    $('statFailed').textContent = c.failed || 0;
+    $('statsUpdated').textContent = data.latestCreatedAt ? '最近任务：' + data.latestCreatedAt : '还没有任务';
+  }
+  function loadStats() { return api('GET', STATS).then(renderStats); }
+  function loadActive() {
+    return api('GET', TASKS + '?scope=active&limit=100').then(function (tasks) {
+      $('activeStatus').textContent = tasks.length ? tasks.length + ' 个任务进行中' : '';
+      renderTaskCards(tasks, 'activeTasks', '暂无进行中的任务');
+    });
+  }
+  function loadHistory(reset) {
+    if (reset) { state.historyOffset = 0; state.history = []; }
+    return api('GET', TASKS + '?scope=history&limit=20&offset=' + state.historyOffset).then(function (tasks) {
+      state.history = reset ? tasks : state.history.concat(tasks);
+      state.historyOffset = state.history.length;
+      $('historyStatus').textContent = state.history.length ? '已显示 ' + state.history.length + ' 个' : '';
+      $('loadMoreBtn').disabled = tasks.length < 20;
+      renderTaskCards(state.history, 'historyTasks', '暂无历史任务');
+    });
+  }
+  function loadTasks() {
+    Promise.all([loadStats(), loadActive()]).catch(function () { $('activeStatus').textContent = '任务加载失败'; });
+  }
+  $('refreshTasksBtn').addEventListener('click', function () { loadTasks(); loadHistory(true); });
+  $('loadMoreBtn').addEventListener('click', function () { loadHistory(false); });
+  loadTasks(); loadHistory(true);
+  setInterval(loadTasks, 10000);
+
+  $('who').textContent = '已通过管理面板认证登录';
+})();
+</script>
+</body>
+</html>

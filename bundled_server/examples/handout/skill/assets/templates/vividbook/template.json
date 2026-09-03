@@ -1,0 +1,9 @@
+{
+  "id": "readex-vivid",
+  "version": "1.2.9",
+  "license": "MIT",
+  "entrypoint": "main.tex",
+  "class": "readex-vivid.cls",
+  "engine": "xelatex",
+  "linksDefault": true
+}

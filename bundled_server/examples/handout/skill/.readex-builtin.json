@@ -1,0 +1,18 @@
+{
+  "installedAt": "2026-08-31T10:24:47Z",
+  "managedFiles": {
+    "SKILL.md": "d7836331828b6d0a4be4cefd420d614896476a85e2e08662f426cdf8e93e66c9",
+    "assets/templates/custom/README.md": "640b444b4cde1b2fcad45f8df3edb25ca988835aae84e3e384f54e2e5e911f76",
+    "assets/templates/vividbook/FONTS.md": "90497a1ae1a1a8bc6be25f6c660ce3b6e28b266287bdddeb8b31af595f8f6229",
+    "assets/templates/vividbook/LICENSE.txt": "3bfb0c0a7cb4c0f3b5bd55bfbeebd43a6881ac22340e972581a48fe1b7335946",
+    "assets/templates/vividbook/main.tex": "6454f9f7e755284b3ec9b34e18ac080400490ec3020e2bd08bae94b7c1f430b8",
+    "assets/templates/vividbook/readex-vivid.cls": "424b78a270d81ea183a249d18db8a4d38f78e1b21bf06345c87b3b54c29b057a",
+    "assets/templates/vividbook/template.json": "e76ea72b14ac9fbc5f7ec16998644ab2bbabe064a7c93b8d843b10d02b3a05fd",
+    "references/figure-selection.md": "dcfc0f5dd5a64aa475939a05c511a16c33aaed8dcb7c42b9ea9447d0e085c9a0",
+    "references/final-qa.md": "5d96f0e01ce4c2e4b73bae548674e9e567bbbf378f6fe9f6836d14011aea07a2",
+    "references/source-citations.md": "3fcc5cd4aadfc500a5f10e7ac11264285337c3093c88c55b9e4eab42d2575eaf",
+    "references/teaching-reconstruction.md": "cf422964c1dabb6c5f9d45547f7a9a3fd76e4dbcc288e596664da6105e4282fb"
+  },
+  "packageVersion": "a2edba53e3c4672eab4a572119067d12557c1d90b7a53c7a3dc02d1ad3b920ca",
+  "version": 1
+}

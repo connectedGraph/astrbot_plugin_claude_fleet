@@ -6,6 +6,10 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import shutil
+import sys
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,8 +35,8 @@ URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 @register(
     PLUGIN_NAME,
     "connectedGraph",
-    "将 QQ 文件和任务提交到本地 claude-fleet-server，完成后自动发送产物",
-    "1.0.0",
+    "一体化 LaTeX 讲义制作：登记 QQ 文件、本地生成并自动发送 PDF",
+    "1.1.0",
 )
 class ClaudeFleetPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any] | None = None):
@@ -49,6 +53,10 @@ class ClaudeFleetPlugin(Star):
         self.index_path = self.storage_dir / "index.json"
         self.tasks_path = self.storage_dir / "tasks.json"
         self.audit_path = self.storage_dir / "audit.jsonl"
+        self.server_runtime_dir = self.storage_dir / "fleet_server"
+        self.server_runtime_path = self.server_runtime_dir / "runtime.json"
+        self.plugin_dir = Path(__file__).resolve().parent
+        self.bundled_server_dir = self.plugin_dir / "bundled_server"
         self._index: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, dict[str, Any]] = {}
         self._next_file_number = 1
@@ -56,17 +64,30 @@ class ClaudeFleetPlugin(Star):
         self._poll_lock = asyncio.Lock()
         self._poll_wakeup = asyncio.Event()
         self._poller_task: asyncio.Task | None = None
+        self._server_process: asyncio.subprocess.Process | None = None
+        self._server_log_tasks: list[asyncio.Task] = []
+        self._server_log_tail: deque[str] = deque(maxlen=40)
+        self._runtime_api_key = ""
+        self._server_start_error = ""
         self._load_state()
 
     async def initialize(self) -> None:
         self._validate_server_url()
+        if self._auto_start_server():
+            try:
+                await self._ensure_bundled_server()
+            except Exception as exc:  # noqa: BLE001
+                self._server_start_error = str(exc)
+                logger.exception("LaTeX 讲义本地服务自动启动失败")
         if self._auto_poll_enabled():
             self._poller_task = asyncio.create_task(
                 self._poll_loop(), name="astrbot-claude-fleet-poller"
             )
         logger.info(
-            "Claude Fleet 插件已加载: server=%s auto_poll=%s",
+            "LaTeX 讲义制作插件已加载: server=%s auto_start=%s owned=%s auto_poll=%s",
             self._server_url(),
+            self._auto_start_server(),
+            self._server_process is not None,
             self._auto_poll_enabled(),
         )
 
@@ -78,6 +99,7 @@ class ClaudeFleetPlugin(Star):
             except asyncio.CancelledError:
                 pass
             self._poller_task = None
+        await self._stop_bundled_server()
 
     # -------------------- 消息入口与上下文注入 --------------------
 
@@ -146,12 +168,14 @@ class ClaudeFleetPlugin(Star):
     async def fleet_health_command(self, event: AstrMessageEvent):
         try:
             health = await self._request_json("GET", "/health", auth=False)
+            mode = "插件内置服务" if self._server_process is not None else "外部服务"
             yield event.plain_result(
-                f"Claude Fleet 正常：{health.get('service', 'claude-fleet-server')} "
-                f"v{health.get('version', 'unknown')}"
+                f"LaTeX 讲义服务正常（{mode}）："
+                f"{health.get('service', 'claude-fleet-server')} v{health.get('version', 'unknown')}"
             )
         except Exception as exc:  # noqa: BLE001
-            yield event.plain_result(f"Claude Fleet 不可用：{exc}")
+            detail = self._server_start_error or str(exc)
+            yield event.plain_result(f"LaTeX 讲义服务不可用：{detail}")
 
     # -------------------- LLM 工具 --------------------
 
@@ -397,7 +421,7 @@ class ClaudeFleetPlugin(Star):
     # -------------------- HTTP --------------------
 
     def _server_url(self) -> str:
-        return str(self.config.get("server_url", "http://127.0.0.1:3180")).strip().rstrip("/")
+        return str(self.config.get("server_url", "http://127.0.0.1:32180")).strip().rstrip("/")
 
     def _validate_server_url(self) -> None:
         parsed = urlparse(self._server_url())
@@ -420,7 +444,7 @@ class ClaudeFleetPlugin(Star):
             raise ValueError("拒绝从 Fleet 服务之外的地址下载产物")
 
     def _headers(self) -> dict[str, str]:
-        token = str(self.config.get("api_key", "")).strip()
+        token = self._runtime_api_key or str(self.config.get("api_key", "")).strip()
         return {"Authorization": f"Bearer {token}"} if token else {}
 
     def _client(self, timeout: float = 30) -> httpx.AsyncClient:
@@ -443,6 +467,211 @@ class ClaudeFleetPlugin(Star):
             )
             response.raise_for_status()
             return response.json()
+
+    # -------------------- 内置 Fleet Server --------------------
+
+    async def _ensure_bundled_server(self) -> None:
+        parsed = urlparse(self._server_url())
+        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("自动启动仅支持本机 HTTP 地址；远程或 HTTPS 服务请关闭 auto_start_server")
+
+        configured_key = str(self.config.get("api_key", "")).strip()
+        runtime = self._load_or_create_server_runtime(configured_key)
+        self._runtime_api_key = configured_key or str(runtime["fleet_api_key"])
+
+        try:
+            health = await self._request_json("GET", "/health", auth=False)
+            if health.get("service") != "claude-fleet-server":
+                raise RuntimeError("server_url 已被其他 HTTP 服务占用")
+            logger.info("检测到已运行的 claude-fleet-server，插件不会重复启动或关闭它")
+            return
+        except (httpx.HTTPError, OSError):
+            pass
+
+        entry = self.bundled_server_dir / "bin" / "fleet.js"
+        executor = self.bundled_server_dir / "examples" / "handout" / "executor.js"
+        skill_dir = self.bundled_server_dir / "examples" / "handout" / "skill"
+        if not entry.is_file() or not executor.is_file() or not skill_dir.is_dir():
+            raise FileNotFoundError("插件包缺少 bundled_server，无法自动启动讲义服务")
+
+        self._ensure_bundled_tool_permissions()
+        node = self._node_executable()
+        self._write_provider_config()
+        port = parsed.port or 80
+        host = parsed.hostname or "127.0.0.1"
+        env = os.environ.copy()
+        env.update(
+            {
+                "HOST": host,
+                "PORT": str(port),
+                "PUBLIC_BASE_URL": self._server_url(),
+                "TASK_ROOT": str(self.server_runtime_dir / "tasks"),
+                "KEYSTORE_FILE": str(self.server_runtime_dir / "keys.json"),
+                "PROVIDERS_FILE": str(self.server_runtime_dir / "providers.json"),
+                "FLEET_API_KEYS": f"{self._runtime_api_key}:astrbot",
+                "CLAUDE_LOCAL_KEY": str(runtime["claude_local_key"]),
+                "FLEET_ADMIN_USER": "admin",
+                "FLEET_ADMIN_PASS": str(runtime["admin_password"]),
+                "FLEET_EXECUTOR": str(executor),
+                "HANDOUT_SKILL_DIR": str(skill_dir),
+                "FLEET_ARTIFACT_SUFFIX": "/output/output.pdf",
+                "AGENT_MAX_TURNS": str(self._agent_max_turns()),
+                "NO_PROXY": "127.0.0.1,localhost,::1",
+            }
+        )
+        claude_bin = str(self.config.get("claude_executable", "")).strip()
+        if claude_bin:
+            env["CLAUDE_BIN"] = claude_bin
+        worker_proxy = str(self.config.get("worker_proxy", "")).strip()
+        if worker_proxy:
+            env["HTTP_PROXY"] = worker_proxy
+            env["HTTPS_PROXY"] = worker_proxy
+            env["NODE_USE_ENV_PROXY"] = "1"
+        else:
+            for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NODE_USE_ENV_PROXY"):
+                env.pop(key, None)
+
+        kwargs: dict[str, Any] = {
+            "cwd": str(self.bundled_server_dir),
+            "env": env,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+        }
+        if sys.platform == "win32":
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        self._server_process = await asyncio.create_subprocess_exec(
+            node, str(entry), "serve", **kwargs
+        )
+        assert self._server_process.stdout is not None
+        assert self._server_process.stderr is not None
+        self._server_log_tasks = [
+            asyncio.create_task(self._drain_server_stream(self._server_process.stdout, "stdout")),
+            asyncio.create_task(self._drain_server_stream(self._server_process.stderr, "stderr")),
+        ]
+
+        deadline = asyncio.get_running_loop().time() + self._server_start_timeout()
+        while asyncio.get_running_loop().time() < deadline:
+            if self._server_process.returncode is not None:
+                tail = " | ".join(self._server_log_tail)
+                await self._stop_bundled_server()
+                raise RuntimeError(f"内置服务提前退出：{tail or '无日志'}")
+            try:
+                health = await self._request_json("GET", "/health", auth=False)
+                if health.get("ok"):
+                    await self._request_json("GET", "/api/tasks/check")
+                    logger.info("内置 LaTeX 讲义服务已启动: pid=%s", self._server_process.pid)
+                    return
+            except (httpx.HTTPError, OSError):
+                await asyncio.sleep(0.25)
+        tail = " | ".join(self._server_log_tail)
+        await self._stop_bundled_server()
+        raise TimeoutError(f"内置服务启动超时：{tail or '无日志'}")
+
+    async def _stop_bundled_server(self) -> None:
+        process = self._server_process
+        self._server_process = None
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=8)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        for task in self._server_log_tasks:
+            if not task.done():
+                task.cancel()
+        if self._server_log_tasks:
+            await asyncio.gather(*self._server_log_tasks, return_exceptions=True)
+        self._server_log_tasks = []
+
+    async def _drain_server_stream(self, stream: asyncio.StreamReader, label: str) -> None:
+        while True:
+            line = await stream.readline()
+            if not line:
+                return
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            self._server_log_tail.append(f"{label}: {text[:500]}")
+            if label == "stderr":
+                logger.warning("[latex-handout-server] %s", text)
+            else:
+                logger.info("[latex-handout-server] %s", text)
+
+    def _load_or_create_server_runtime(self, configured_key: str) -> dict[str, str]:
+        self.server_runtime_dir.mkdir(parents=True, exist_ok=True)
+        value: dict[str, Any] = {}
+        if self.server_runtime_path.is_file():
+            try:
+                loaded = json.loads(self.server_runtime_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    value = loaded
+            except (OSError, json.JSONDecodeError):
+                logger.warning("内置服务 runtime.json 无效，将重新生成缺失字段")
+        value["fleet_api_key"] = configured_key or str(value.get("fleet_api_key") or secrets.token_urlsafe(32))
+        value["claude_local_key"] = str(value.get("claude_local_key") or secrets.token_urlsafe(32))
+        value["admin_password"] = str(value.get("admin_password") or secrets.token_urlsafe(24))
+        self._atomic_json_write(self.server_runtime_path, value)
+        return {key: str(value[key]) for key in ("fleet_api_key", "claude_local_key", "admin_password")}
+
+    def _write_provider_config(self) -> None:
+        base_url = str(self.config.get("provider_base_url", "")).strip().rstrip("/")
+        model = str(self.config.get("provider_model", "")).strip()
+        api_key = str(self.config.get("provider_api_key", "")).strip()
+        if not base_url and not model and not api_key:
+            return
+        if not base_url or not model:
+            raise ValueError("配置模型供应商时，provider_base_url 与 provider_model 必须同时填写")
+        provider_type = str(self.config.get("provider_type", "openai")).strip().lower()
+        if provider_type not in {"openai", "anthropic"}:
+            raise ValueError("provider_type 只能是 openai 或 anthropic")
+        if not re.match(r"^https?://", base_url, re.IGNORECASE):
+            raise ValueError("provider_base_url 必须是 HTTP(S) 地址")
+        path = self.server_runtime_dir / "providers.json"
+        data: dict[str, Any] = {"activeProviderId": "astrbot", "providers": {}}
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+            except (OSError, json.JSONDecodeError):
+                pass
+        providers = data.setdefault("providers", {})
+        previous = providers.get("astrbot", {}) if isinstance(providers, dict) else {}
+        providers["astrbot"] = {
+            "type": provider_type,
+            "baseUrl": base_url,
+            "apiKey": api_key or str(previous.get("apiKey", "")),
+            "model": model,
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        data["activeProviderId"] = "astrbot"
+        self._atomic_json_write(path, data)
+
+    def _node_executable(self) -> str:
+        configured = str(self.config.get("node_executable", "")).strip()
+        if configured:
+            path = Path(configured)
+            if not path.is_file():
+                raise FileNotFoundError(f"找不到 Node.js：{configured}")
+            return str(path)
+        found = shutil.which("node")
+        if not found:
+            raise FileNotFoundError("找不到 Node.js；请安装 Node.js 18+ 或配置 node_executable")
+        return found
+
+    def _ensure_bundled_tool_permissions(self) -> None:
+        if sys.platform == "win32":
+            return
+        relative_paths = (
+            "bin/fleet.js",
+            "examples/handout/skill/tools/cloudtex/bin/cloudtex-linux-amd64",
+            "examples/handout/skill/tools/ocrcli/bin/ocrcli-linux-amd64",
+        )
+        for relative in relative_paths:
+            path = self.bundled_server_dir / relative
+            if path.is_file():
+                path.chmod(path.stat().st_mode | 0o111)
 
     # -------------------- 文件与状态 --------------------
 
@@ -648,6 +877,10 @@ class ClaudeFleetPlugin(Star):
         value = self.config.get("auto_poll_enabled", True)
         return value if isinstance(value, bool) else str(value).lower() not in {"0", "false", "off", "no"}
 
+    def _auto_start_server(self) -> bool:
+        value = self.config.get("auto_start_server", True)
+        return value if isinstance(value, bool) else str(value).lower() not in {"0", "false", "off", "no"}
+
     def _allow_remote_server(self) -> bool:
         value = self.config.get("allow_remote_server", False)
         return value if isinstance(value, bool) else str(value).lower() in {"1", "true", "on", "yes"}
@@ -663,6 +896,18 @@ class ClaudeFleetPlugin(Star):
             return max(1, min(int(self.config.get("poll_timeout_hours", 24)), 168))
         except (TypeError, ValueError):
             return 24
+
+    def _server_start_timeout(self) -> int:
+        try:
+            return max(3, min(int(self.config.get("server_start_timeout_seconds", 20)), 120))
+        except (TypeError, ValueError):
+            return 20
+
+    def _agent_max_turns(self) -> int:
+        try:
+            return max(5, min(int(self.config.get("agent_max_turns", 60)), 200))
+        except (TypeError, ValueError):
+            return 60
 
     def _max_files_per_message(self) -> int:
         try:

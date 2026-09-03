@@ -1,143 +1,113 @@
-# AstrBot Claude Fleet 本地任务桥接插件
+# latex讲义制作插件
 
-把 AstrBot / NapCat 收到的 QQ 文件与用户任务提交给本机
-[`claude-fleet-server`](https://github.com/connectedGraph/claude-fleet-server)，由本地 Claude Code
-worker 异步执行，完成后自动把产物发回原 QQ 会话。
+一个可直接导入 AstrBot 的一体化 LaTeX PDF 讲义制作插件。
 
-本插件默认只连接 `127.0.0.1` 或 `localhost`，不依赖公网任务服务器。
+ZIP 已包含 [`claude-fleet-server`](https://github.com/connectedGraph/claude-fleet-server)、
+本地任务队列、`/mcp` 服务、Claude Code worker、LaTeX 讲义执行器、模板以及编译工具。
+不需要再单独克隆或启动 Fleet Server，也不再依赖公网 6767 任务服务。
 
-## 主要能力
+## 能做什么
 
-- 自动捕获 QQ 私聊文件和群文件，登记为 `fleet-file-000001` 形式的稳定 ID。
-- LLM 工具 `fleet_submit_task`：把任务要求及一个或多个文件以 Base64 提交到本地 Fleet。
-- LLM 工具 `fleet_get_task`：按 `taskId` 查询任务。
-- LLM 工具 `fleet_list_tasks`：列出当前 API Key 名下最近任务。
-- `/fleet状态`：检查本地服务是否在线。
-- 插件内部静默轮询，不使用 AstrBot Cron，不会周期性唤醒模型或消耗聊天 Token。
-- 任务成功后自动下载并发送产物；失败最多通知一次。
-- 根据文件头自动识别 PDF、PNG、JPEG、ZIP，其他产物按 `.bin` 发送。
-- HTTP 客户端使用 `trust_env=False`，访问本机服务不经过系统代理。
+- 自动捕获 QQ 私聊文件和群文件，登记为 `fleet-file-000001`。
+- 模型自主调用 `fleet_submit_task`，将完整要求、网页链接和多个文件提交给本地服务。
+- 插件内部以 REST 静默查询任务，不创建 AstrBot Cron，不周期性唤醒模型。
+- Claude Code 在隔离目录中读取资料、编写 LaTeX、调用 cloudtex 编译并校验 PDF。
+- 完成后自动下载 PDF，通过 NapCat / OneBot 发回原 QQ 会话。
+- 失败最多通知一次；同一轮 Agent 禁止重复提交。
+- 内置服务同时提供 Streamable HTTP MCP：`http://127.0.0.1:32180/mcp`。
 
-## 工作链路
+## 一体化链路
 
 ```text
-QQ 文件 / 用户要求
+QQ 文件 / 网页链接 / 用户要求
         ↓
-AstrBot 插件登记文件
+AstrBot 登记文件并让模型调用 fleet_submit_task
         ↓
-模型调用 fleet_submit_task（一次）
+插件内置 Fleet Server（127.0.0.1:32180）
         ↓
-POST http://127.0.0.1:3180/api/tasks
+Claude Code worker + LaTeX 讲义执行器
         ↓
-claude-fleet-server 排队并启动 Claude Code worker
+插件静默查询 REST 状态
         ↓
-插件直接查询 REST 状态（不唤醒模型）
-        ↓
-完成后下载 artifact 并发回原 QQ 会话
+PDF 完成后经 NapCat 自动发回原 QQ 会话
 ```
 
 ## 前置条件
 
 - AstrBot `>= 4.25.1`
-- NapCat / OneBot v11（如需 QQ 文件收发）
-- Python 环境中已有 `httpx` 与 AstrBot 自带的 MCP 类型依赖
 - Node.js `>= 18`
-- 已安装可用的 Claude Code CLI
-- 本机已部署 `claude-fleet-server`
+- Claude Code CLI `>= 2.0.0`
+- NapCat / OneBot v11（用于 QQ 文件接收和 PDF 发送）
+- 一个可用的 OpenAI 兼容或 Anthropic Messages 模型 API
 
-## 一、启动本地 claude-fleet-server
+Fleet Server 和讲义资源已包含在插件 ZIP 中；Node.js、Claude Code 与模型 API Key 不会打包。
 
-先获取服务端：
+## 安装
 
-```powershell
-git clone https://github.com/connectedGraph/claude-fleet-server.git
-cd claude-fleet-server
-npm run doctor
-```
+从 Releases 下载 `astrbot_plugin_claude_fleet_v1.1.0.zip`，在 AstrBot WebUI 的插件页面导入，
+然后重启 AstrBot。
 
-最小启动示例：
-
-```powershell
-$env:HOST = "127.0.0.1"
-$env:PORT = "3180"
-$env:PUBLIC_BASE_URL = "http://127.0.0.1:3180"
-$env:CLAUDE_LOCAL_KEY = "请换成随机本地密钥"
-$env:FLEET_API_KEYS = "请换成插件访问密钥:astrbot"
-$env:FLEET_ADMIN_USER = "admin"
-$env:FLEET_ADMIN_PASS = "请换成管理密码"
-
-npm run serve
-```
-
-如果希望 Fleet 专门生成 PDF 讲义：
-
-```powershell
-$env:FLEET_EXECUTOR = ".\examples\handout\executor.js"
-$env:HANDOUT_SKILL_DIR = ".\examples\handout\skill"
-$env:FLEET_ARTIFACT_SUFFIX = "/output/output.pdf"
-npm run serve
-```
-
-还需要在 Fleet 管理面板中配置实际模型供应商：
+插件显示名为：
 
 ```text
-http://127.0.0.1:3180/console
+latex讲义制作插件
 ```
 
-服务健康检查：
+内部插件 ID 继续使用 `astrbot_plugin_claude_fleet`，因此可直接覆盖升级 v1.0.0，避免同时加载两份。
 
-```powershell
-curl.exe http://127.0.0.1:3180/health
-```
+## 必填配置
 
-## 二、安装 AstrBot 插件
+在 AstrBot 插件配置中填写模型供应商：
 
-### ZIP 导入
+| 配置项 | 说明 |
+|---|---|
+| `provider_type` | `openai` 或 `anthropic` |
+| `provider_base_url` | 供应商 Base URL |
+| `provider_api_key` | 供应商 API Key |
+| `provider_model` | 实际模型 ID |
 
-从 Releases 下载 ZIP，在 AstrBot WebUI 的插件页面中导入，然后重启 AstrBot。
-
-### 手动安装
-
-把仓库目录复制到：
+OpenAI 兼容接口示例：
 
 ```text
-AstrBot/data/plugins/astrbot_plugin_claude_fleet/
+provider_type = openai
+provider_base_url = https://api.example.com/v1
+provider_model = example-model
 ```
 
-重启 AstrBot 后，日志应出现：
+Anthropic Messages 接口示例：
 
 ```text
-Claude Fleet 插件已加载: server=http://127.0.0.1:3180 auto_poll=True
+provider_type = anthropic
+provider_base_url = https://api.anthropic.com/v1
+provider_model = claude-model-id
 ```
 
-## 三、插件配置
+`provider_api_key` 只写入 AstrBot 本地配置和插件运行数据，不写进 ZIP、Git 或日志。
 
-在 AstrBot WebUI 中填写：
+## 主要配置
 
 | 配置项 | 默认值 | 说明 |
 |---|---:|---|
-| `server_url` | `http://127.0.0.1:3180` | Fleet 服务地址 |
-| `api_key` | 空 | `FLEET_API_KEYS` 中冒号左侧的 Bearer Key |
-| `allow_remote_server` | `false` | 是否允许非本机地址 |
-| `storage_dir` | 空 | 文件索引、任务状态和产物保存目录 |
-| `auto_poll_enabled` | `true` | 是否自动静默查询任务 |
-| `poll_interval_seconds` | `15` | 查询间隔，最低 10 秒 |
-| `poll_timeout_hours` | `24` | 单个任务最长自动查询时间 |
-| `max_files_per_message` | `20` | 单条消息最多登记文件数 |
-| `max_file_bytes` | `8388608` | 单文件大小限制 |
+| `auto_start_server` | `true` | 自动启动 ZIP 内置服务 |
+| `server_url` | `http://127.0.0.1:32180` | 内置服务地址；端口冲突时可改 |
+| `api_key` | 空 | 内置模式留空自动生成；外部模式填写 Bearer Key |
+| `node_executable` | 空 | 留空从 PATH 自动查找 Node.js |
+| `claude_executable` | 空 | 留空自动查找 Claude Code |
+| `worker_proxy` | 空 | 默认不走代理；需要时手动填写 |
+| `agent_max_turns` | `60` | 限制 worker 回合数，防止完成后无限自检 |
+| `auto_poll_enabled` | `true` | 插件内部静默查询 |
+| `poll_interval_seconds` | `15` | 查询间隔 |
+| `poll_timeout_hours` | `24` | 自动查询最长时间 |
 
-`api_key` 示例：
+内置 Fleet API Key、Claude 本地代理 Key 和管理密码会首次启动时随机生成，保存在：
 
 ```text
-服务端：FLEET_API_KEYS=my-local-key:astrbot
-插件：api_key = my-local-key
+AstrBot/data/plugin_data/astrbot_plugin_claude_fleet/fleet_server/runtime.json
 ```
 
-不要把真实 Key 提交到 Git 仓库或截图公开。
+## 人格工具白名单
 
-## 四、人格工具白名单
-
-如果 AstrBot 人格配置了工具白名单，需要加入：
+如果人格启用了工具白名单，加入：
 
 ```json
 [
@@ -147,80 +117,71 @@ Claude Fleet 插件已加载: server=http://127.0.0.1:3180 auto_poll=True
 ]
 ```
 
-推荐在人格提示词中加入：
+推荐提示词：
 
 ```text
-当用户明确要求执行本地 Claude Fleet 任务时，调用一次 fleet_submit_task。
-instructions 必须完整复述用户要求并保留网页链接；有文件时传入准确的 fleet-file ID。
-提交成功后只简短确认，不要循环查询，也不要发送工具 JSON 或中间日志。
-插件会静默查询任务，完成后自动发送产物，失败只通知一次。
+当用户要求把文件、资料或网页制作成讲义时，调用一次 fleet_submit_task。
+instructions 要完整复述用户要求，并原样保留网页链接；有已登记文件时传入准确的 fleet-file ID。
+提交成功后只简短确认并结束本轮，不要循环查询，不要再次提交，不要输出工具 JSON。
+插件会在后台静默查询，完成后自动发送 PDF，失败只通知一次。
 ```
 
-## 五、使用示例
+## 使用
 
-### 处理文件
+文件讲义：
 
-1. 用户先发送文件。
-2. Bot 回复：`已登记文件 fleet-file-000001：example.pdf`。
-3. 用户发送：`@机器人 把刚才文件整理成一份讲义`。
-4. 模型调用 `fleet_submit_task`。
-5. 任务完成后插件自动发送产物。
+1. 在 QQ 发送一个或多个文件。
+2. Bot 返回 `已登记文件 fleet-file-000001：资料.pdf`。
+3. 发送“把刚才的资料制作成一份中文讲义”。
+4. 模型提交一次任务；完成后插件自动发送 PDF。
 
-### 处理网页
+网页讲义：
 
 ```text
-@机器人 阅读 https://example.com/article 并生成一份研究报告
+阅读 https://example.com/article，把它制作成一份 LaTeX PDF 讲义
 ```
 
-模型应把完整 URL 保留在 `instructions` 中；不需要先上传文件。
+链接不要求是纯链接消息。模型会把包含链接的完整要求放进 `instructions`。
 
-### 手动检查
+检查服务：
 
 ```text
 /fleet状态
 ```
 
-## 安全设计
+## 外部 Fleet Server 模式
 
-- 默认拒绝连接非本机 Fleet 地址。
-- Bearer Key 只通过请求头发送，不写入审计日志。
-- 产物只允许从与 Fleet 服务相同的源下载，且下载时不携带 API Key。
-- 本地路径、Base64、完整控制台日志不会注入普通聊天消息。
-- 后台轮询直接调用 REST，不创建 AstrBot `active_agent` Cron。
-- 同一轮模型运行最多允许提交一个任务，阻止工具循环。
-- 后台 synthetic/Cron 事件不能创建 Fleet 任务。
+如需连接自己管理的 Fleet Server：
 
-## 常见问题
+- 关闭 `auto_start_server`
+- 修改 `server_url`
+- 填写 `api_key`
+- 非本机地址还需开启 `allow_remote_server`
 
-### `/fleet状态` 正常，但提交返回 401
+插件只会关闭自己启动的内置进程，不会关闭检测到的外部服务。
 
-检查插件 `api_key` 是否与服务端 `FLEET_API_KEYS` 中的 key 完全一致，然后重启服务端。
+## 安全与稳定性
 
-### 任务一直 queued
+- 内置服务默认仅监听 `127.0.0.1`。
+- 本地 REST 请求使用 `trust_env=False`，不会误走系统代理。
+- worker 默认不走代理；只有配置 `worker_proxy` 后才启用。
+- 产物只允许从与 Fleet Server 同源的 URL 下载，下载时不携带 API Key。
+- Base64、完整任务 JSON、控制台日志和中间进度不会发进 QQ 消息。
+- 后台轮询不调用 LLM，不创建 Cron，不消耗聊天 Token。
+- `agent_max_turns` 与服务端硬超时共同限制内部 Agent 循环。
+- 插件停用时只回收自己创建的 Node 进程。
 
-运行：
+## 已验证
 
-```powershell
-npm run doctor
-```
+- AstrBot 4.25.1 环境导入，三个 LLM 工具成功登记。
+- 插件自动启动内置服务，`/health` 与带 Bearer 的 `/api/tasks/check` 返回 200。
+- 插件终止后内置服务端口释放。
+- 上游显式测试 12/12 通过。
+- 真实 Claude Code 任务完成，cloudtex 生成 `%PDF-1.7`，artifact 下载返回 200。
 
-确认 Claude Code CLI 可被定位，并检查 Fleet 控制台中的供应商配置、队列和 worker 日志。
+## 许可证与上游
 
-### 任务成功但 QQ 没收到产物
+本插件使用 Apache License 2.0。
 
-确认：
-
-- NapCat 与 AstrBot OneBot WebSocket 已连接。
-- 原 QQ 会话仍然有效。
-- Bot 具有群文件发送权限。
-- Fleet 的 `PUBLIC_BASE_URL` 对 AstrBot 进程可访问。
-
-## 开发验证
-
-```powershell
-python -m py_compile main.py
-```
-
-## 许可证
-
-本插件使用 Apache License 2.0。`claude-fleet-server` 为独立上游项目，同样使用 Apache License 2.0。
+ZIP 内嵌的 `claude-fleet-server` 来自 connectedGraph，同样使用 Apache License 2.0；
+其原始许可证、README 与源码保留在 `bundled_server/`。详见 `THIRD_PARTY_NOTICES.md`。

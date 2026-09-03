@@ -1,53 +1,21 @@
 {
-  "server_url": {
-    "description": "claude-fleet-server 地址",
-    "type": "string",
-    "default": "http://127.0.0.1:3180",
-    "hint": "默认只允许本机地址，不经过系统代理。"
-  },
-  "api_key": {
-    "description": "Fleet Bearer API Key",
-    "type": "string",
-    "default": "",
-    "obvious_hint": true,
-    "hint": "对应服务端 FLEET_API_KEYS 中冒号左侧的 key。"
-  },
-  "allow_remote_server": {
-    "description": "允许连接非本机 Fleet 服务",
-    "type": "bool",
-    "default": false
-  },
-  "storage_dir": {
-    "description": "插件数据目录",
-    "type": "string",
-    "default": "",
-    "hint": "留空使用 AstrBot/data/plugin_data/astrbot_plugin_claude_fleet。"
-  },
-  "auto_poll_enabled": {
-    "description": "自动静默查询任务",
-    "type": "bool",
-    "default": true,
-    "hint": "直接请求本地 REST API，不会唤醒模型。"
-  },
-  "poll_interval_seconds": {
-    "description": "静默查询间隔（秒）",
-    "type": "int",
-    "default": 15
-  },
-  "poll_timeout_hours": {
-    "description": "单个任务自动查询最长时间（小时）",
-    "type": "int",
-    "default": 24,
-    "hint": "超过后停止查询并最多通知一次。"
-  },
-  "max_files_per_message": {
-    "description": "单条消息最多登记文件数",
-    "type": "int",
-    "default": 20
-  },
-  "max_file_bytes": {
-    "description": "单个文件大小上限（字节）",
-    "type": "int",
-    "default": 8388608
-  }
+  "auto_start_server": {"description": "自动启动内置讲义服务", "type": "bool", "default": true, "hint": "推荐开启。插件会启动 ZIP 内自带的 Fleet Server，并在停用时只关闭自己启动的进程。"},
+  "server_url": {"description": "讲义服务地址", "type": "string", "default": "http://127.0.0.1:32180", "hint": "内置服务默认使用此本机地址；如端口冲突可改为其他空闲端口。"},
+  "api_key": {"description": "Fleet Bearer API Key", "type": "string", "default": "", "obvious_hint": true, "hint": "内置模式留空会自动生成并保存；连接外部服务时填写服务端 FLEET_API_KEYS 中冒号左侧的 key。"},
+  "node_executable": {"description": "Node.js 可执行文件", "type": "string", "default": "", "hint": "留空自动从 PATH 查找 node；要求 Node.js 18 或更高版本。"},
+  "claude_executable": {"description": "Claude Code 可执行文件", "type": "string", "default": "", "hint": "留空由 Fleet 自动查找 claude；找不到时填写 claude.exe 或 claude.cmd 的绝对路径。"},
+  "provider_type": {"description": "模型供应商协议", "type": "string", "options": ["openai", "anthropic"], "default": "openai", "hint": "OpenAI 兼容接口选 openai；Anthropic Messages 接口选 anthropic。"},
+  "provider_base_url": {"description": "模型供应商 Base URL", "type": "string", "default": "", "hint": "OpenAI 示例：https://api.example.com/v1；Anthropic 示例：https://api.anthropic.com/v1。"},
+  "provider_api_key": {"description": "模型供应商 API Key", "type": "string", "default": "", "obvious_hint": true, "hint": "仅写入 AstrBot 本地配置和插件运行数据，不会打进 ZIP 或日志。"},
+  "provider_model": {"description": "讲义生成模型", "type": "string", "default": "", "hint": "填写供应商实际支持的模型 ID。"},
+  "worker_proxy": {"description": "讲义 worker 出站代理", "type": "string", "default": "", "hint": "默认不走代理；确有需要时填写，例如 http://127.0.0.1:7890。"},
+  "server_start_timeout_seconds": {"description": "内置服务启动超时（秒）", "type": "int", "default": 20},
+  "agent_max_turns": {"description": "单个讲义任务最大 Agent 回合数", "type": "int", "default": 60, "hint": "用于阻止模型在产物完成后无限自检；建议保持默认。"},
+  "allow_remote_server": {"description": "允许连接非本机 Fleet 服务", "type": "bool", "default": false, "hint": "使用内置服务时保持关闭。"},
+  "storage_dir": {"description": "插件数据目录", "type": "string", "default": "", "hint": "留空使用 AstrBot/data/plugin_data/astrbot_plugin_claude_fleet。"},
+  "auto_poll_enabled": {"description": "自动静默查询任务", "type": "bool", "default": true, "hint": "直接查询本地 REST API，不会唤醒模型。"},
+  "poll_interval_seconds": {"description": "静默查询间隔（秒）", "type": "int", "default": 15},
+  "poll_timeout_hours": {"description": "单个任务自动查询最长时间（小时）", "type": "int", "default": 24},
+  "max_files_per_message": {"description": "单条消息最多登记文件数", "type": "int", "default": 20},
+  "max_file_bytes": {"description": "单个文件大小上限（字节）", "type": "int", "default": 8388608}
 }

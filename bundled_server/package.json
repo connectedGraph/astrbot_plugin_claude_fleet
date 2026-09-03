@@ -1,0 +1,37 @@
+{
+  "name": "claude-fleet-server",
+  "version": "0.1.0",
+  "description": "Turn any installed Claude Code CLI into a programmable worker fleet with task queue, provider routing, and resume. Zero runtime deps.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "fleet": "bin/fleet.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node app/server.js",
+    "serve": "node bin/fleet.js serve",
+    "doctor": "node bin/fleet.js doctor",
+    "test": "node --test test/"
+  },
+  "keywords": [
+    "claude-code",
+    "claude",
+    "agent",
+    "worker",
+    "llm-proxy",
+    "mcp",
+    "task-queue"
+  ],
+  "files": [
+    "bin",
+    "lib",
+    "app",
+    "public",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ]
+}
