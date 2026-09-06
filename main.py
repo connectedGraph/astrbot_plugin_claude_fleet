@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import sys
+import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +21,7 @@ from mcp.types import CallToolResult, TextContent
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import At, File, Plain
+from astrbot.api.message_components import At, File, Image, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.message import TextPart
@@ -35,8 +36,8 @@ URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 @register(
     PLUGIN_NAME,
     "connectedGraph",
-    "一体化 LaTeX 讲义制作：登记 QQ 文件、本地生成并自动发送 PDF",
-    "1.1.0",
+    "一体化 LaTeX 讲义制作：登记 QQ 文件与图片、本地生成并自动发送 PDF",
+    "1.2.0",
 )
 class ClaudeFleetPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any] | None = None):
@@ -79,16 +80,18 @@ class ClaudeFleetPlugin(Star):
             except Exception as exc:  # noqa: BLE001
                 self._server_start_error = str(exc)
                 logger.exception("LaTeX 讲义本地服务自动启动失败")
+        await asyncio.to_thread(self._cleanup_stale_downloads)
         if self._auto_poll_enabled():
             self._poller_task = asyncio.create_task(
                 self._poll_loop(), name="astrbot-claude-fleet-poller"
             )
         logger.info(
-            "LaTeX 讲义制作插件已加载: server=%s auto_start=%s owned=%s auto_poll=%s",
+            "LaTeX 讲义制作插件已加载: server=%s auto_start=%s owned=%s auto_poll=%s concurrency=%s",
             self._server_url(),
             self._auto_start_server(),
             self._server_process is not None,
             self._auto_poll_enabled(),
+            self._worker_concurrency(),
         )
 
     async def terminate(self) -> None:
@@ -105,62 +108,158 @@ class ClaudeFleetPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def capture_files(self, event: AstrMessageEvent):
+        """静默、非阻塞捕获会话中发送的文件和图片素材，不阻塞事件流水线。"""
         components = getattr(getattr(event, "message_obj", None), "message", []) or []
-        file_components = [item for item in components if isinstance(item, File)]
-        if not file_components:
+        media_components = [
+            item for item in components if isinstance(item, (File, Image))
+        ]
+        if not media_components:
             return
+
         records: list[dict[str, Any]] = []
         errors: list[str] = []
-        for component in file_components[: self._max_files_per_message()]:
+        for component in media_components[: self._max_files_per_message()]:
             try:
-                records.append(await self._register_file(component, event))
+                rec = await self._register_media_item(component, event)
+                if rec:
+                    records.append(rec)
             except Exception as exc:  # noqa: BLE001
-                logger.exception("Claude Fleet 文件登记失败")
+                logger.warning("Claude Fleet 素材登记失败: %s", exc)
                 errors.append(str(exc))
-        event.set_extra("claude_fleet_records", records)
-        event.set_extra("claude_fleet_errors", errors)
-        fresh = [item for item in records if not item.get("_dedup_reused")]
-        if fresh and not event.is_at_or_wake_command:
-            text = "\n".join(
-                f"已登记文件 {item['file_id']}：{item['name']}（{item['size_bytes']} bytes）"
-                for item in fresh
-            )
-            await event.send(MessageChain([Plain(text)]))
+
+        if records:
+            event.set_extra("claude_fleet_records", records)
+        if errors:
+            event.set_extra("claude_fleet_errors", errors)
 
     @filter.on_llm_request()
     async def inject_fleet_context(self, event: AstrMessageEvent, req: ProviderRequest):
+        # 1. 动态注入工具：确保不管当前 Persona 是否配置了工具白名单，模型都能正常调用讲义工具
+        try:
+            tmgr = self.context.get_llm_tool_manager()
+            if req.func_tool is None:
+                from astrbot.core.agent.tool import ToolSet
+                req.func_tool = ToolSet()
+            for tool_name in ("fleet_submit_task", "fleet_get_task", "fleet_list_tasks"):
+                tool = tmgr.get_func(tool_name)
+                if tool and not req.func_tool.get_tool(tool_name):
+                    req.func_tool.add_tool(tool)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("动态注入 Fleet 工具失败: %s", exc)
+
+        # 2. 检查是否有相关上下文（文件、图片或讲义需求）
         records = event.get_extra("claude_fleet_records", []) or []
         errors = event.get_extra("claude_fleet_errors", []) or []
         text = str(event.message_str or "")
         links = self._extract_urls(text)
         needs_context = bool(
             re.search(
-                r"文件|附件|刚才|上面|这份|任务|执行|处理|生成|讲义|PDF|进度|状态|fleet|Claude",
+                r"文件|附件|图片|截图|刚才|上面|这份|任务|执行|处理|生成|讲义|PDF|海报|排版|进度|状态|fleet|Claude",
                 text,
                 re.IGNORECASE,
             )
         )
+        wants_pdf = bool(
+            re.search(
+                r"讲义|PDF|做成PDF|要PDF|转成PDF|排版|制作|宣传单|文档|海报",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
         if not records and needs_context:
-            records = self._recent_files(event, limit=3)
-        if not records and not errors and not links:
+            records = self._recent_files(event, limit=5)
+            # 如果仍没有，尝试自动关联最近生图插件生成的图片
+            if not records:
+                recent_imgs = self._find_recent_system_images()
+                for img_path in recent_imgs:
+                    try:
+                        rec = await self._register_local_path(img_path, event)
+                        if rec:
+                            records.append(rec)
+                            break
+                    except Exception:
+                        pass
+
+        if not records and not errors and not links and not needs_context:
             return
+
         lines = [
             "<claude_fleet_context>",
-            "你具备真实的本地 Claude Fleet 任务能力。用户要求执行任务时，调用 fleet_submit_task。",
-            "fleet_submit_task 成功后立即给出一句简短确认并结束本轮；不要自行循环查询。",
-            "插件会直接轮询本地服务，处理中不发消息；完成后自动发送产物，失败只通知一次。",
-            "不要调用其他消息工具重复发送原文件、任务 JSON、控制台日志或中间进度。",
+            "你具备真实的本地 Claude Fleet 任务能力，可自动生成专业 LaTeX 讲义并编译为 PDF 交付。",
+            "规则：",
+            "1. 当用户要求把文件、图片、网页、主题或刚才生成的内容制作成讲义/PDF时，你必须调用 fleet_submit_task 工具！",
+            "2. fleet_submit_task 成功后，必须立即给出一句简短友好的确认（说明任务已提交后台排队，生成完成后会自动发送到此聊天），并立即结束本轮回复。",
+            "3. 严禁自行循环查询进度，严禁重复提交任务；任务在后台完全异步运行，完成后会自动发送产物。",
         ]
-        for item in records:
+        if wants_pdf:
             lines.append(
-                f"file_id={item['file_id']} name={item['name']} size_bytes={item['size_bytes']}"
+                "【强制执行指令】用户当前明确要求制作/生成讲义或 PDF 文档！\n"
+                "你必须在第一步立即调用 fleet_submit_task 工具发起任务！\n"
+                "- 无论当前是否有新上传的附件（包括纯主题、基于刚才对话中的海报/图文内容），都必须立即调用 fleet_submit_task，把任务要求和排版内容直接完整写入 instructions 参数！\n"
+                "- 严禁用自然语言向用户索要文件，严禁口头回复'稍后'而不调工具，严禁假装已经提交！\n"
+                "- 工具调用成功后，只输出一句简短确认，并立即结束本轮回复！"
             )
+        if records:
+            lines.append("当前可用素材：")
+            for item in records:
+                lines.append(
+                    f"- file_id={item['file_id']} 名称={item['name']} 大小={item['size_bytes']} bytes"
+                )
         for url in links:
-            lines.append(f"url={url}")
+            lines.append(f"- 关联链接: {url}")
         if errors:
-            lines.append("文件登记错误：" + "；".join(errors))
+            lines.append("素材提示：" + "；".join(errors))
         lines.append("</claude_fleet_context>")
-        req.extra_user_content_parts.append(TextPart(text="\n".join(lines)))
+
+        instruction_text = "\n".join(lines)
+        req.extra_user_content_parts.append(TextPart(text=instruction_text))
+        if req.system_prompt is not None:
+            req.system_prompt += f"\n\n{instruction_text}\n"
+
+    def _find_recent_system_images(self) -> list[Path]:
+        img_dir = self.plugin_dir.parent / "astrbot_plugin_image_generation" / "data" / "images"
+        if not img_dir.is_dir():
+            return []
+        now = datetime.now(timezone.utc).timestamp()
+        results = []
+        for p in img_dir.glob("*.png"):
+            if now - p.stat().st_mtime < 1800:
+                results.append((p.stat().st_mtime, p))
+        results.sort(key=lambda x: x[0], reverse=True)
+        return [p for _, p in results[:3]]
+
+    async def _register_local_path(self, source: Path, event: AstrMessageEvent) -> dict[str, Any] | None:
+        if not source.is_file():
+            return None
+        size = source.stat().st_size
+        digest = await asyncio.to_thread(self._sha256_file, source)
+        sender_id = str(event.get_sender_id() or "")
+        group_id = str(event.get_group_id() or "")
+        session = str(event.unified_msg_origin or "")
+        async with self._file_lock:
+            now = datetime.now(timezone.utc)
+            file_id = f"fleet-file-{self._next_file_number:06d}"
+            self._next_file_number += 1
+            stored_name = f"{file_id}{source.suffix}"
+            self.files_dir.mkdir(parents=True, exist_ok=True)
+            target = self.files_dir / stored_name
+            await asyncio.to_thread(shutil.copyfile, source, target)
+            record = {
+                "file_id": file_id,
+                "name": source.name,
+                "stored_name": stored_name,
+                "size_bytes": size,
+                "sha256": digest,
+                "sender_id": sender_id,
+                "group_id": group_id,
+                "session": session,
+                "platform": str(event.get_platform_name() or ""),
+                "created_at": now.isoformat(),
+            }
+            self._index[file_id] = record
+            await asyncio.to_thread(self._save_index)
+            return record
 
     # -------------------- 命令 --------------------
 
@@ -171,7 +270,8 @@ class ClaudeFleetPlugin(Star):
             mode = "插件内置服务" if self._server_process is not None else "外部服务"
             yield event.plain_result(
                 f"LaTeX 讲义服务正常（{mode}）："
-                f"{health.get('service', 'claude-fleet-server')} v{health.get('version', 'unknown')}"
+                f"{health.get('service', 'claude-fleet-server')} v{health.get('version', 'unknown')} "
+                f"并发 worker 数={self._worker_concurrency()}"
             )
         except Exception as exc:  # noqa: BLE001
             detail = self._server_start_error or str(exc)
@@ -186,11 +286,11 @@ class ClaudeFleetPlugin(Star):
         instructions: str,
         file_ids: str = "",
     ):
-        '''向本地 Claude Fleet 提交异步任务。
+        '''向本地 Claude Fleet 提交异步讲义制作任务。
 
         Args:
-            instructions(string): 完整任务要求；网页链接必须原样保留在这里
-            file_ids(string): 可选，逗号分隔的 fleet-file-000001 文件 ID
+            instructions(string): 完整任务要求与讲义排版规范；网页链接必须原样保留在此处
+            file_ids(string): 可选，文件 ID 或素材文件名（如 fleet-file-000001 或图片名，留空则自动关联本会话最近素材）
         '''
         if str(event.get_platform_name() or "").lower() == "cron":
             yield self._tool_result("禁止 Cron 或后台 Agent 创建 Fleet 任务。")
@@ -198,60 +298,50 @@ class ClaudeFleetPlugin(Star):
         if not isinstance(instructions, str) or not instructions.strip():
             yield self._tool_result("instructions 不能为空")
             return
+
         previous = str(event.get_extra("claude_fleet_submitted_task", "") or "")
         if previous:
             yield self._tool_result(
-                f"本轮已经提交任务 taskId={previous}，禁止重复提交；立即输出 final message。"
+                f"本轮已经提交任务 taskId={previous}，禁止重复提交；请立即向用户简短确认并结束本轮对话。"
             )
             return
+
         try:
-            requested_ids = self._parse_file_ids(file_ids)
-            if not requested_ids:
-                requested_ids = [
-                    str(item.get("file_id", ""))
-                    for item in event.get_extra("claude_fleet_records", []) or []
-                    if item.get("file_id")
-                ]
-            files: list[dict[str, str]] = []
-            names: list[str] = []
-            for file_id in requested_ids:
-                record, path = self._lookup_file(file_id)
-                files.append(
-                    {
-                        "name": str(record.get("name") or file_id),
-                        "contentBase64": base64.b64encode(path.read_bytes()).decode("ascii"),
-                    }
-                )
-                names.append(str(record.get("name") or file_id))
+            # 智能匹配/解析素材文件（支持 JSON 数组、文件名、ID 或自动回退最近文件）
+            resolved_files = await self._resolve_input_files(file_ids, event)
+
             payload: dict[str, Any] = {
                 "instructions": instructions.strip(),
-                "files": files,
+                "files": resolved_files,
             }
-            if names:
-                payload["mainFileName"] = names[0]
+            if resolved_files:
+                payload["mainFileName"] = resolved_files[0]["name"]
+
+            # 向 Gateway 异步提交
             result = await self._request_json("POST", "/api/tasks", json_body=payload)
             task_id = str(result.get("taskId", ""))
             if not TASK_ID_RE.fullmatch(task_id):
                 raise RuntimeError(f"服务未返回有效 taskId：{result}")
+
             self._tasks[task_id] = {
                 "task_id": task_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "status": str(result.get("status", "queued")),
                 "instructions": instructions.strip(),
-                "file_ids": requested_ids,
-                "file_names": names,
+                "file_names": [f["name"] for f in resolved_files],
                 "session": str(event.unified_msg_origin or ""),
                 "platform": str(event.get_platform_name() or ""),
                 "sender_id": str(event.get_sender_id() or ""),
                 "group_id": str(event.get_group_id() or ""),
             }
-            self._save_tasks()
-            self._audit("task_submitted", event, task_id=task_id, file_ids=requested_ids)
+            await asyncio.to_thread(self._save_tasks)
+            self._audit("task_submitted", event, task_id=task_id, file_count=len(resolved_files))
             event.set_extra("claude_fleet_submitted_task", task_id)
             self._poll_wakeup.set()
+
             yield self._tool_result(
-                f"已提交本地 Claude Fleet 任务，taskId={task_id}。"
-                "插件会静默查询并自动发送产物；立即输出一句简短 final message，禁止继续查询或重复提交。"
+                f"已成功创建本地讲义制作任务，taskId={task_id}。\n"
+                "后台 worker 正在并发排队生成 PDF。请立即向用户输出一句简短确认（如：'讲义制作任务已提交（ID: ...），正在后台生成，完成后将自动发送给您。'）并立即结束本轮回复，不要调用其他工具。"
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("提交 Claude Fleet 任务失败")
@@ -259,7 +349,7 @@ class ClaudeFleetPlugin(Star):
 
     @filter.llm_tool(name="fleet_get_task")
     async def fleet_get_task(self, event: AstrMessageEvent, task_id: str):
-        '''查询一个本地 Claude Fleet 任务。
+        '''查询一个本地 Claude Fleet 任务状态。
 
         Args:
             task_id(string): fleet_submit_task 返回的 UUID
@@ -333,19 +423,20 @@ class ClaudeFleetPlugin(Star):
                         )
                         saved["polling_disabled_reason"] = "poll_timeout"
                         saved["polling_disabled_at"] = datetime.now(timezone.utc).isoformat()
-                        self._save_tasks()
+                        await asyncio.to_thread(self._save_tasks)
                         continue
                 except (TypeError, ValueError):
                     saved["polling_disabled_reason"] = "invalid_created_at"
-                    self._save_tasks()
+                    await asyncio.to_thread(self._save_tasks)
                     continue
+
                 try:
                     result = await self._request_json("GET", f"/api/tasks/{task_id}")
                     status = str(result.get("status", "")).lower()
                     saved["status"] = status
                     saved["last_polled_at"] = datetime.now(timezone.utc).isoformat()
                     saved.pop("last_poll_error", None)
-                    self._save_tasks()
+                    await asyncio.to_thread(self._save_tasks)
                     if status == "succeeded":
                         await self._deliver_artifact(task_id, result)
                     elif status in {"failed", "expired", "cancelled", "canceled"}:
@@ -356,11 +447,11 @@ class ClaudeFleetPlugin(Star):
                         saved["polling_disabled_at"] = datetime.now(timezone.utc).isoformat()
                     else:
                         saved["last_poll_error"] = str(exc)[:500]
-                    self._save_tasks()
+                    await asyncio.to_thread(self._save_tasks)
                 except Exception as exc:  # noqa: BLE001
                     saved["last_poll_error"] = str(exc)[:500]
                     saved["last_polled_at"] = datetime.now(timezone.utc).isoformat()
-                    self._save_tasks()
+                    await asyncio.to_thread(self._save_tasks)
                     logger.warning("查询 Fleet 任务失败 task_id=%s: %s", task_id, exc)
 
     async def _deliver_artifact(
@@ -374,34 +465,41 @@ class ClaudeFleetPlugin(Star):
             return {"sent": False, "reason": "本地没有任务会话信息"}
         if saved.get("delivered_at"):
             return {"sent": False, "already_sent": True}
+
         artifact_url = str(result.get("artifactUrl", "")).strip()
         if not artifact_url:
             artifact_url = f"{self._server_url()}/tasks/{task_id}/artifact"
         self._validate_artifact_url(artifact_url)
+
         async with self._client(timeout=180) as client:
-            # Fleet 的 artifact 路由本身是 capability URL，无需携带 API Key。
             response = await client.get(artifact_url)
             response.raise_for_status()
+
         suffix = self._detect_suffix(response.content)
-        filename = f"claude-fleet-{task_id}{suffix}"
+        display_name = f"讲义-{task_id[:8]}{suffix}" if suffix == ".pdf" else f"claude-fleet-{task_id[:8]}{suffix}"
+        storage_filename = f"claude-fleet-{task_id}{suffix}"
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        output = (self.artifacts_dir / filename).resolve()
+        output = (self.artifacts_dir / storage_filename).resolve()
         if output.parent != self.artifacts_dir.resolve():
             raise RuntimeError("产物路径无效")
+
         await asyncio.to_thread(output.write_bytes, response.content)
-        chain = MessageChain([File(name=filename, file=str(output))])
+        chain = MessageChain([File(name=display_name, file=str(output))])
+
         if event is not None:
             await event.send(chain)
         else:
-            sent = await self.context.send_message(str(saved.get("session", "")), chain)
+            session = str(saved.get("session", ""))
+            sent = await self.context.send_message(session, chain)
             if not sent:
                 raise RuntimeError("原始 QQ 会话尚未连接，稍后重试发送")
+
         saved["delivered_at"] = datetime.now(timezone.utc).isoformat()
         saved["artifact_path"] = str(output)
         saved["artifact_bytes"] = len(response.content)
-        self._save_tasks()
+        await asyncio.to_thread(self._save_tasks)
         self._audit("artifact_delivered", self._audit_event(saved), task_id=task_id, path=str(output))
-        return {"sent": True, "filename": filename, "bytes": len(response.content)}
+        return {"sent": True, "filename": display_name, "bytes": len(response.content)}
 
     async def _notify_failure(self, saved: dict[str, Any], result: dict[str, Any]) -> None:
         if saved.get("terminal_notified_at"):
@@ -411,14 +509,15 @@ class ClaudeFleetPlugin(Star):
         parts: list[Any] = []
         if saved.get("group_id") and saved.get("sender_id"):
             parts.append(At(qq=str(saved["sender_id"])))
-        parts.append(Plain(f"Claude Fleet 任务失败：{reason}"))
-        sent = await self.context.send_message(str(saved.get("session", "")), MessageChain(parts))
+        parts.append(Plain(f"Claude Fleet 任务未成功生成：{reason}"))
+        session = str(saved.get("session", ""))
+        sent = await self.context.send_message(session, MessageChain(parts))
         if not sent:
             raise RuntimeError("原始 QQ 会话尚未连接，稍后重试失败通知")
         saved["terminal_notified_at"] = datetime.now(timezone.utc).isoformat()
-        self._save_tasks()
+        await asyncio.to_thread(self._save_tasks)
 
-    # -------------------- HTTP --------------------
+    # -------------------- HTTP 客户端 --------------------
 
     def _server_url(self) -> str:
         return str(self.config.get("server_url", "http://127.0.0.1:32180")).strip().rstrip("/")
@@ -481,10 +580,9 @@ class ClaudeFleetPlugin(Star):
 
         try:
             health = await self._request_json("GET", "/health", auth=False)
-            if health.get("service") != "claude-fleet-server":
-                raise RuntimeError("server_url 已被其他 HTTP 服务占用")
-            logger.info("检测到已运行的 claude-fleet-server，插件不会重复启动或关闭它")
-            return
+            if health.get("service") == "claude-fleet-server":
+                logger.info("检测到已运行的 claude-fleet-server，插件复用该服务")
+                return
         except (httpx.HTTPError, OSError):
             pass
 
@@ -497,7 +595,7 @@ class ClaudeFleetPlugin(Star):
         self._ensure_bundled_tool_permissions()
         node = self._node_executable()
         self._write_provider_config()
-        port = parsed.port or 80
+        port = parsed.port or 32180
         host = parsed.hostname or "127.0.0.1"
         env = os.environ.copy()
         env.update(
@@ -516,6 +614,7 @@ class ClaudeFleetPlugin(Star):
                 "HANDOUT_SKILL_DIR": str(skill_dir),
                 "FLEET_ARTIFACT_SUFFIX": "/output/output.pdf",
                 "AGENT_MAX_TURNS": str(self._agent_max_turns()),
+                "WORKER_CONCURRENCY": str(self._worker_concurrency()),
                 "NO_PROXY": "127.0.0.1,localhost,::1",
             }
         )
@@ -673,70 +772,229 @@ class ClaudeFleetPlugin(Star):
             if path.is_file():
                 path.chmod(path.stat().st_mode | 0o111)
 
-    # -------------------- 文件与状态 --------------------
+    # -------------------- 素材解析与注册（非阻塞） --------------------
 
-    async def _register_file(self, component: File, event: AstrMessageEvent) -> dict[str, Any]:
-        source_path = await component.get_file()
-        if not source_path or not os.path.isfile(source_path):
-            raise FileNotFoundError("平台文件无法下载或本地文件不存在")
-        source = Path(source_path)
-        size = source.stat().st_size
-        if size > self._max_file_bytes():
-            raise ValueError(f"文件超过大小限制（{self._max_file_bytes()} bytes）")
-        digest = await asyncio.to_thread(self._sha256_file, source)
-        name = str(getattr(component, "name", "") or source.name)
-        sender_id = str(event.get_sender_id() or "")
-        group_id = str(event.get_group_id() or "")
-        async with self._file_lock:
-            now = datetime.now(timezone.utc)
-            for existing in self._index.values():
-                if (
-                    existing.get("sha256") == digest
-                    and existing.get("name") == name
-                    and existing.get("sender_id") == sender_id
-                    and existing.get("group_id") == group_id
-                ):
+    async def _register_media_item(
+        self, component: File | Image, event: AstrMessageEvent
+    ) -> dict[str, Any] | None:
+        """从 File 或 Image 组件中安全、极速地提取文件并存入索引。"""
+        source_path = ""
+        is_downloaded_temp = False
+        name = getattr(component, "name", "") or ""
+
+        if isinstance(component, Image):
+            # 1. 检查是否已经是本地已有路径（NapCat/Lagrange 本地缓存）
+            for attr in ("path", "file"):
+                val = getattr(component, attr, None)
+                if val:
+                    cleaned = self._clean_file_url(str(val))
+                    if os.path.isfile(cleaned):
+                        source_path = cleaned
+                        break
+
+            # 2. 若无本地路径，检查 URL 是否可用
+            if not source_path:
+                url = getattr(component, "url", None) or getattr(component, "file", None) or ""
+                if str(url).startswith("http"):
+                    source_path = await self._download_direct_url(str(url), is_image=True)
+                    is_downloaded_temp = True
+                elif hasattr(component, "convert_to_file_path"):
                     try:
-                        age = (now - datetime.fromisoformat(str(existing.get("created_at")))).total_seconds()
-                    except (TypeError, ValueError):
-                        age = 999
-                    stored = self.files_dir / str(existing.get("stored_name", ""))
-                    if 0 <= age <= 30 and stored.is_file():
-                        reused = dict(existing)
-                        reused["_dedup_reused"] = True
-                        return reused
-            file_id = f"fleet-file-{self._next_file_number:06d}"
-            self._next_file_number += 1
-            suffix = source.suffix[:20]
-            stored_name = f"{file_id}{suffix}"
-            self.files_dir.mkdir(parents=True, exist_ok=True)
-            target = self.files_dir / stored_name
-            await asyncio.to_thread(target.write_bytes, source.read_bytes())
-            record = {
-                "file_id": file_id,
-                "name": name,
-                "stored_name": stored_name,
-                "size_bytes": size,
-                "sha256": digest,
-                "sender_id": sender_id,
-                "group_id": group_id,
-                "platform": str(event.get_platform_name() or ""),
-                "created_at": now.isoformat(),
-            }
-            self._index[file_id] = record
-            self._save_index()
-            return record
+                        source_path = await asyncio.wait_for(component.convert_to_file_path(), timeout=15)
+                    except Exception as e:
+                        logger.warning("Image.convert_to_file_path 超时或失败: %s", e)
 
-    def _lookup_file(self, file_id: str) -> tuple[dict[str, Any], Path]:
-        if not FILE_ID_RE.fullmatch(file_id):
-            raise ValueError(f"无效文件 ID：{file_id}")
-        record = self._index.get(file_id)
-        if not record:
-            raise FileNotFoundError(f"找不到文件：{file_id}")
-        path = (self.files_dir / str(record.get("stored_name", ""))).resolve()
-        if path.parent != self.files_dir.resolve() or not path.is_file():
-            raise FileNotFoundError(f"文件副本不存在：{file_id}")
-        return record, path
+            if not name:
+                name = Path(source_path).name if source_path else "image.png"
+            if not Path(name).suffix:
+                name += ".png"
+
+        elif isinstance(component, File):
+            # 1. 检查本地已有文件
+            for attr in ("file_", "file"):
+                val = getattr(component, attr, None)
+                if val:
+                    cleaned = self._clean_file_url(str(val))
+                    if os.path.isfile(cleaned):
+                        source_path = cleaned
+                        break
+
+            # 2. 若无本地路径，直接下载或调用 get_file
+            if not source_path:
+                url = getattr(component, "url", None) or ""
+                if url.startswith("http"):
+                    source_path = await self._download_direct_url(url, is_image=False)
+                    is_downloaded_temp = True
+                elif hasattr(component, "get_file"):
+                    try:
+                        source_path = await asyncio.wait_for(component.get_file(), timeout=30)
+                    except Exception as e:
+                        logger.warning("File.get_file 超时或失败: %s", e)
+
+            if not name:
+                name = Path(source_path).name if source_path else "document.bin"
+
+        if not source_path or not os.path.isfile(source_path):
+            raise FileNotFoundError(f"素材获取失败或本地文件不存在: {name}")
+
+        try:
+            source = Path(source_path)
+            size = source.stat().st_size
+            if size > self._max_file_bytes():
+                raise ValueError(f"文件大小 ({size} bytes) 超过允许上限")
+
+            digest = await asyncio.to_thread(self._sha256_file, source)
+            sender_id = str(event.get_sender_id() or "")
+            group_id = str(event.get_group_id() or "")
+            session = str(event.unified_msg_origin or "")
+
+            async with self._file_lock:
+                now = datetime.now(timezone.utc)
+                # 去重：如果 60 秒内同一人发了相同文件，直接复用
+                for existing in self._index.values():
+                    if (
+                        existing.get("sha256") == digest
+                        and existing.get("name") == name
+                        and existing.get("sender_id") == sender_id
+                        and existing.get("group_id") == group_id
+                    ):
+                        stored = self.files_dir / str(existing.get("stored_name", ""))
+                        if stored.is_file():
+                            return existing
+
+                file_id = f"fleet-file-{self._next_file_number:06d}"
+                self._next_file_number += 1
+                suffix = source.suffix[:15] or (".png" if isinstance(component, Image) else ".bin")
+                stored_name = f"{file_id}{suffix}"
+                self.files_dir.mkdir(parents=True, exist_ok=True)
+                target = self.files_dir / stored_name
+
+                # 线程池中拷贝文件，绝不阻塞主事件循环
+                await asyncio.to_thread(shutil.copyfile, source, target)
+
+                record = {
+                    "file_id": file_id,
+                    "name": name,
+                    "stored_name": stored_name,
+                    "size_bytes": size,
+                    "sha256": digest,
+                    "sender_id": sender_id,
+                    "group_id": group_id,
+                    "session": session,
+                    "platform": str(event.get_platform_name() or ""),
+                    "created_at": now.isoformat(),
+                }
+                self._index[file_id] = record
+                await asyncio.to_thread(self._save_index)
+                logger.info("Claude Fleet 成功登记素材: file_id=%s, name=%s, size=%d bytes", file_id, name, size)
+                return record
+        finally:
+            if is_downloaded_temp and source_path and os.path.isfile(source_path):
+                try:
+                    os.unlink(source_path)
+                except OSError:
+                    pass
+
+    def _cleanup_stale_downloads(self) -> None:
+        temp_dir = self.storage_dir / "temp_downloads"
+        if not temp_dir.exists():
+            return
+        now = time.time()
+        for p in temp_dir.iterdir():
+            if p.is_file():
+                try:
+                    if now - p.stat().st_mtime > 3600:
+                        p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    async def _download_direct_url(self, url: str, is_image: bool = False) -> str:
+        """国内 CDN 直连下载：对于 qq/qpic/gtimg 域名绕过系统代理，避免翻墙代理导致的延迟与断连。"""
+        suffix = ".png" if is_image else ".bin"
+        temp_dir = self.storage_dir / "temp_downloads"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        dest = temp_dir / f"dl_{secrets.token_hex(8)}{suffix}"
+
+        parsed = urlparse(url)
+        is_tencent = any(dom in parsed.netloc.lower() for dom in ("qq.com", "qpic.cn", "gtimg.com"))
+        # 如果是腾讯 CDN，禁用系统代理直连；其他链接按环境决定
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, trust_env=not is_tencent) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            await asyncio.to_thread(dest.write_bytes, resp.content)
+        return str(dest)
+
+    @staticmethod
+    def _clean_file_url(path_or_url: str) -> str:
+        if path_or_url.startswith("file:///"):
+            path_or_url = path_or_url[8:]
+        elif path_or_url.startswith("file://"):
+            path_or_url = path_or_url[7:]
+        if os.name == "nt" and len(path_or_url) > 2 and path_or_url[0] == "/" and path_or_url[2] == ":":
+            path_or_url = path_or_url[1:]
+        return path_or_url
+
+    async def _resolve_input_files(
+        self, raw_input: str, event: AstrMessageEvent
+    ) -> list[dict[str, str]]:
+        """智能解析 LLM 传入的文件参数：兼容 JSON 列表、逗号分隔、文件名、ID 或自动关联会话最新文件。"""
+        tokens: list[str] = []
+        raw_str = str(raw_input or "").strip()
+        if raw_str:
+            if raw_str.startswith("[") and raw_str.endswith("]"):
+                try:
+                    parsed = json.loads(raw_str)
+                    if isinstance(parsed, list):
+                        tokens = [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    tokens = [item.strip() for item in re.split(r"[,，\s]+", raw_str) if item.strip()]
+            else:
+                tokens = [item.strip() for item in re.split(r"[,，\s]+", raw_str) if item.strip()]
+
+        matched_records: list[dict[str, Any]] = []
+
+        for token in tokens:
+            clean = token.strip("\"'[] ")
+            # 1. 尝试按 fleet-file-xxxxxx 匹配
+            if FILE_ID_RE.fullmatch(clean) and clean in self._index:
+                matched_records.append(self._index[clean])
+                continue
+            # 2. 尝试按文件名完全或部分匹配
+            for rec in reversed(list(self._index.values())):
+                rec_name = str(rec.get("name", "")).lower()
+                clean_lower = clean.lower()
+                if clean_lower and (clean_lower == rec_name or clean_lower in rec_name or rec_name in clean_lower):
+                    if rec not in matched_records:
+                        matched_records.append(rec)
+                        break
+
+        # 如果用户/模型没有传任何文件参数，或者未匹配到，自动取本会话最新 1~3 个文件/图片
+        if not matched_records:
+            recent = self._recent_files(event, limit=3)
+            matched_records.extend(recent)
+
+        # 异步读取文件并进行 Base64 转换
+        result_files: list[dict[str, str]] = []
+        for rec in matched_records[:10]:
+            stored_name = str(rec.get("stored_name", ""))
+            path = self.files_dir / stored_name
+            if not path.is_file():
+                continue
+
+            def _read_b64(p: Path) -> str:
+                return base64.b64encode(p.read_bytes()).decode("ascii")
+
+            b64_content = await asyncio.to_thread(_read_b64, path)
+            name = str(rec.get("name") or stored_name)
+            # 确保具有有效后缀
+            if not Path(name).suffix and Path(stored_name).suffix:
+                name += Path(stored_name).suffix
+            result_files.append({
+                "name": name,
+                "contentBase64": b64_content,
+            })
+
+        return result_files
 
     def _recent_files(self, event: AstrMessageEvent, limit: int) -> list[dict[str, Any]]:
         sender_id = str(event.get_sender_id() or "")
@@ -751,16 +1009,6 @@ class ClaudeFleetPlugin(Star):
         ]
         records.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
         return records[:limit]
-
-    @staticmethod
-    def _parse_file_ids(raw: str) -> list[str]:
-        if not raw:
-            return []
-        values = [item.strip() for item in re.split(r"[,，\s]+", str(raw)) if item.strip()]
-        invalid = [item for item in values if not FILE_ID_RE.fullmatch(item)]
-        if invalid:
-            raise ValueError("无效文件 ID：" + ", ".join(invalid))
-        return list(dict.fromkeys(values))[:20]
 
     @staticmethod
     def _extract_urls(text: str) -> list[str]:
@@ -845,7 +1093,7 @@ class ClaudeFleetPlugin(Star):
             with self.audit_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:  # noqa: BLE001
-            logger.exception("写入 Claude Fleet 审计日志失败")
+            pass
 
     @staticmethod
     def _audit_event(task: dict[str, Any]):
@@ -887,9 +1135,9 @@ class ClaudeFleetPlugin(Star):
 
     def _poll_interval_seconds(self) -> int:
         try:
-            return max(10, min(int(self.config.get("poll_interval_seconds", 15)), 3600))
+            return max(5, min(int(self.config.get("poll_interval_seconds", 10)), 3600))
         except (TypeError, ValueError):
-            return 15
+            return 10
 
     def _poll_timeout_hours(self) -> int:
         try:
@@ -909,6 +1157,12 @@ class ClaudeFleetPlugin(Star):
         except (TypeError, ValueError):
             return 60
 
+    def _worker_concurrency(self) -> int:
+        try:
+            return max(1, min(int(self.config.get("worker_concurrency", 5)), 10))
+        except (TypeError, ValueError):
+            return 5
+
     def _max_files_per_message(self) -> int:
         try:
             return max(1, min(int(self.config.get("max_files_per_message", 20)), 20))
@@ -917,6 +1171,6 @@ class ClaudeFleetPlugin(Star):
 
     def _max_file_bytes(self) -> int:
         try:
-            return max(1, int(self.config.get("max_file_bytes", 8 * 1024 * 1024)))
+            return max(1, int(self.config.get("max_file_bytes", 20 * 1024 * 1024)))
         except (TypeError, ValueError):
-            return 8 * 1024 * 1024
+            return 20 * 1024 * 1024

@@ -11,6 +11,7 @@
   "worker_proxy": {"description": "讲义 worker 出站代理", "type": "string", "default": "", "hint": "默认不走代理；确有需要时填写，例如 http://127.0.0.1:7890。"},
   "server_start_timeout_seconds": {"description": "内置服务启动超时（秒）", "type": "int", "default": 20},
   "agent_max_turns": {"description": "单个讲义任务最大 Agent 回合数", "type": "int", "default": 60, "hint": "用于阻止模型在产物完成后无限自检；建议保持默认。"},
+  "worker_concurrency": {"description": "并行讲义任务数", "type": "int", "default": 1, "hint": "同一 Fleet Gateway 后最多同时运行的 Claude worker 数，范围 1-10；并发越高，模型额度、内存和 CPU 占用越高。"},
   "allow_remote_server": {"description": "允许连接非本机 Fleet 服务", "type": "bool", "default": false, "hint": "使用内置服务时保持关闭。"},
   "storage_dir": {"description": "插件数据目录", "type": "string", "default": "", "hint": "留空使用 AstrBot/data/plugin_data/astrbot_plugin_claude_fleet。"},
   "auto_poll_enabled": {"description": "自动静默查询任务", "type": "bool", "default": true, "hint": "直接查询本地 REST API，不会唤醒模型。"},

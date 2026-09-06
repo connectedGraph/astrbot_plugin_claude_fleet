@@ -95,6 +95,7 @@ provider_model = claude-model-id
 | `claude_executable` | 空 | 留空自动查找 Claude Code |
 | `worker_proxy` | 空 | 默认不走代理；需要时手动填写 |
 | `agent_max_turns` | `60` | 限制 worker 回合数，防止完成后无限自检 |
+| `worker_concurrency` | `1` | 同一 Gateway 后并行运行的 Claude worker 数，范围 1-10 |
 | `auto_poll_enabled` | `true` | 插件内部静默查询 |
 | `poll_interval_seconds` | `15` | 查询间隔 |
 | `poll_timeout_hours` | `24` | 自动查询最长时间 |
