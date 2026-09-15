@@ -1,4 +1,4 @@
-# latex讲义制作插件
+# Latex讲义制作
 
 一个可直接导入 AstrBot 的一体化 LaTeX PDF 讲义制作插件。
 

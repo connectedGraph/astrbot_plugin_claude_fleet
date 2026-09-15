@@ -1,5 +1,5 @@
 name: astrbot_plugin_claude_fleet
-display_name: latex讲义制作插件
+display_name: Latex讲义制作
 short_desc: 一次导入即可在本机生成 LaTeX PDF 讲义并自动发回 QQ。
 desc: 内置 claude-fleet-server、LaTeX 讲义执行器和完整制作资源，支持 QQ 文件登记、Base64 多文件提交、网页链接任务、静默轮询和 PDF 自动发送；后台查询不唤醒 LLM。
 version: v1.1.0
